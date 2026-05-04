@@ -1,0 +1,53 @@
+# --- Python / backend ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments (never commit — use requirements.txt)
+venv/
+.venv/
+env/
+
+# Secrets / local config
+.env
+.env.*
+!.env.example
+
+# Generated outputs (large binaries — regenerate locally)
+backend/output/
+*.zip
+
+# Optional: uncomment if input images are private or huge
+# backend/input_images/
+
+# Testing / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+
+# Frontend (if not already ignored in subfolder)
+node_modules/
