@@ -34,8 +34,9 @@ env/
 backend/output/
 *.zip
 
-# Optional: uncomment if input images are private or huge
-# backend/input_images/
+# Local assets (change often; not part of source control)
+backend/input_images/
+backend/mockups/
 
 # Testing / coverage
 .pytest_cache/
