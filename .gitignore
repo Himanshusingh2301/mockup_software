@@ -37,6 +37,12 @@ backend/output/
 # Local assets (change often; not part of source control)
 backend/input_images/
 backend/mockups/
+backend/template_config.json
+backend/temp/
+
+# Frontend build/cache artifacts
+mockup-tool-frontend/dist/
+mockup-tool-frontend/.vite/
 
 # Testing / coverage
 .pytest_cache/
