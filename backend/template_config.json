@@ -1,0 +1,23 @@
+[
+  {
+    "id": "overlay_hands_example",
+    "template_path": "mockups/01.png",
+    "mode": "overlay",
+    "card_geometry": "quad",
+    "fit": "cover",
+    "cover_anchor": "center",
+    "white_threshold": 240,
+    "mask_expand_px": 2,
+    "mask_feather_px": 0.8,
+    "white_mask_feather_px": 0.8,
+    "white_mask_erode_iters": 0,
+    "paper_edge_blend": true,
+    "paper_edge_blend_min_alpha": 0.00392156862745098,
+    "mask_align_quad_x": true,
+    "mask_align_use_centroid": true,
+    "mask_align_flip_x": false,
+    "cover_offset_x": 0,
+    "cover_offset_y": 0,
+    "render_scale": 2
+  }
+]

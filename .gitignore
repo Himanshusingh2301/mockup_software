@@ -38,9 +38,7 @@ backend/output/
 # Local runtime data (per machine / per deploy — not source)
 backend/input_images/
 backend/mockups/
-backend/template_config.json
-backend/workspace_users.json
-backend/workspace_data/
+
 backend/temp/
 
 # Frontend build & tooling cache
