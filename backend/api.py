@@ -429,6 +429,7 @@ def _rel_env_path(p: Path) -> str:
 @app.post("/api/generate")
 def generate(ws: WorkspaceUser, payload: GeneratePayload | None = None):
     ensure_dirs()
+    print(f"[generate] start user={ws}", flush=True)
     if payload is None or payload.templates is None:
         raise HTTPException(status_code=400, detail="Templates are required in generate payload.")
     if not isinstance(payload.templates, list) or len(payload.templates) == 0:
@@ -444,12 +445,14 @@ def generate(ws: WorkspaceUser, payload: GeneratePayload | None = None):
         file.is_file() and file.suffix.lower() in IMAGE_SUFFIXES
         for file in paths["temp_mockups"].iterdir()
     )
+    print(f"[generate] temp_has_mockups={temp_has_mockups}", flush=True)
     if temp_has_mockups:
         copy_images(paths["temp_mockups"], paths["mockups"])
     temp_has_inputs = any(
         file.is_file() and file.suffix.lower() in IMAGE_SUFFIXES
         for file in paths["temp_inputs"].iterdir()
     )
+    print(f"[generate] temp_has_inputs={temp_has_inputs}", flush=True)
     if temp_has_inputs:
         copy_images(paths["temp_inputs"], paths["inputs"])
 
@@ -459,6 +462,7 @@ def generate(ws: WorkspaceUser, payload: GeneratePayload | None = None):
     gen_env["MOCKGENERATOR_MOCKUPS_FOLDER"] = _rel_env_path(paths["mockups"])
     gen_env["MOCKGENERATOR_TEMPLATE_CONFIG"] = _rel_env_path(paths["template_config"])
 
+    print("[generate] running script.py ...", flush=True)
     process = subprocess.run(
         [sys.executable, "script.py"],
         cwd=str(BASE_DIR),
@@ -466,7 +470,13 @@ def generate(ws: WorkspaceUser, payload: GeneratePayload | None = None):
         text=True,
         env=gen_env,
     )
+    print(f"[generate] script returncode={process.returncode}", flush=True)
     if process.returncode != 0:
+        print(
+            "[generate] script stderr snippet:\n"
+            + "\n".join(process.stderr.splitlines()[:40]),
+            flush=True,
+        )
         raise HTTPException(
             status_code=500,
             detail={
@@ -475,6 +485,7 @@ def generate(ws: WorkspaceUser, payload: GeneratePayload | None = None):
                 "stderr": process.stderr,
             },
         )
+    print("[generate] success", flush=True)
     return {"ok": True, "stdout": process.stdout}
 
 
