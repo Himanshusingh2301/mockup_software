@@ -215,11 +215,25 @@ class WorkspaceRegisterPayload(BaseModel):
 
 app = FastAPI(title="Mock Generator API", version="1.0.0")
 
-# CORS: disallow allow_origins=["*"] together with allow_credentials=True (browser / Starlette rejected).
+# CORS: never combine allow_origins=["*"] with allow_credentials=True (invalid for browsers).
+# Origin header never has a trailing slash — strip trailing slashes from FRONTEND_ORIGIN or CORS won't match.
+def _parse_cors_origins(raw: str) -> list[str]:
+    out: list[str] = []
+    for part in raw.split(","):
+        u = part.strip().rstrip("/")
+        if u:
+            out.append(u)
+    return out
+
+
 _frontend_origin = os.getenv("FRONTEND_ORIGIN", "").strip()
 if _frontend_origin:
-    _cors_origins = [o.strip() for o in _frontend_origin.split(",") if o.strip()]
-    _cors_credentials = True
+    _cors_origins = _parse_cors_origins(_frontend_origin)
+    if not _cors_origins:
+        _cors_origins = ["*"]
+        _cors_credentials = False
+    else:
+        _cors_credentials = True
 else:
     _cors_origins = ["*"]
     _cors_credentials = False
@@ -230,6 +244,7 @@ app.add_middleware(
     allow_credentials=_cors_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
+    max_age=86400,
 )
 
 
