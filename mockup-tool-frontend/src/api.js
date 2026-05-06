@@ -1,12 +1,48 @@
+import { USER_ID_STORAGE_KEY } from "./workspaceUserId";
+
 const API_BASE = (import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000").replace(/\/$/, "");
 
+let workspaceUserIdForRequests = "";
+
+/** Hydrate from localStorage before any React effect runs (avoids race with initial /api/assets fetch). */
+function readWorkspaceIdFromStorage() {
+  try {
+    const raw = localStorage.getItem(USER_ID_STORAGE_KEY);
+    workspaceUserIdForRequests = raw?.trim() || "";
+  } catch {
+    workspaceUserIdForRequests = "";
+  }
+}
+
+readWorkspaceIdFromStorage();
+
+/** Call when the signed-in workspace user id changes (from App). */
+export function setWorkspaceUserIdForApi(id) {
+  workspaceUserIdForRequests = (id && String(id).trim()) || "";
+}
+
+/** Append workspace id for GETs that cannot send headers (img src, direct links). */
+export function appendWorkspaceAuth(pathOrUrl) {
+  const full = pathOrUrl.startsWith("http") ? pathOrUrl : `${API_BASE}${pathOrUrl}`;
+  if (!workspaceUserIdForRequests) return full;
+  const sep = full.includes("?") ? "&" : "?";
+  return `${full}${sep}workspace_user_id=${encodeURIComponent(workspaceUserIdForRequests)}`;
+}
+
 async function request(path, options = {}) {
-  const response = await fetch(`${API_BASE}${path}`, options);
+  const { skipWorkspaceHeader, ...rest } = options;
+  const headers = new Headers(rest.headers);
+  if (!skipWorkspaceHeader && workspaceUserIdForRequests && !headers.has("X-Workspace-User-Id")) {
+    headers.set("X-Workspace-User-Id", workspaceUserIdForRequests);
+  }
+  const response = await fetch(`${API_BASE}${path}`, { ...rest, headers });
   if (!response.ok) {
     let detail = `Request failed: ${response.status}`;
     try {
       const data = await response.json();
-      detail = data?.detail?.message || JSON.stringify(data?.detail || data);
+      const d = data?.detail;
+      if (typeof d === "string") detail = d;
+      else detail = d?.message || JSON.stringify(d ?? data);
     } catch {
       // no-op
     }
@@ -22,6 +58,20 @@ async function request(path, options = {}) {
 export const apiBase = API_BASE;
 
 export const api = {
+  registerWorkspaceUser: (userId) =>
+    request("/api/workspace/register", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ user_id: userId }),
+      skipWorkspaceHeader: true,
+    }),
+  loginWorkspaceUser: (userId) =>
+    request("/api/workspace/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ user_id: userId }),
+      skipWorkspaceHeader: true,
+    }),
   getAssets: () => request("/api/assets"),
   getTemplates: () => request("/api/templates"),
   saveTemplates: (templates) =>
@@ -61,7 +111,7 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ templates }),
     }),
-  downloadOutputs: () => `${API_BASE}/api/download/outputs`,
-  downloadOutputFile: (filePath) => `${API_BASE}/api/download/output-file/${encodeURIComponent(filePath)}`,
-  downloadOutputFolder: (folderName) => `${API_BASE}/api/download/output-folder/${encodeURIComponent(folderName)}`,
+  downloadOutputs: () => appendWorkspaceAuth("/api/download/outputs"),
+  downloadOutputFile: (filePath) => appendWorkspaceAuth(`/api/download/output-file/${encodeURIComponent(filePath)}`),
+  downloadOutputFolder: (folderName) => appendWorkspaceAuth(`/api/download/output-folder/${encodeURIComponent(folderName)}`),
 };

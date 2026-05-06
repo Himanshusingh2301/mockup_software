@@ -6,10 +6,10 @@ import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 from urllib.parse import quote, unquote
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
@@ -17,22 +17,36 @@ from pydantic import BaseModel
 import script
 
 BASE_DIR = Path(__file__).resolve().parent
-MOCKUPS_DIR = BASE_DIR / "mockups"
-INPUTS_DIR = BASE_DIR / "input_images"
-OUTPUT_DIR = BASE_DIR / "output"
-TEMPLATE_CONFIG_PATH = BASE_DIR / "template_config.json"
+WORKSPACE_DATA_DIR = BASE_DIR / "workspace_data"
+WORKSPACE_USERS_PATH = BASE_DIR / "workspace_users.json"
 TEMP_ROOT_DIR = Path(tempfile.gettempdir()) / "mockgenerator"
-TEMP_MOCKUPS_DIR = TEMP_ROOT_DIR / "mockups"
-TEMP_INPUTS_DIR = TEMP_ROOT_DIR / "input_images"
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
 
 
+def workspace_paths(user_id: str) -> dict[str, Path]:
+    """Per-user mockups, inputs, outputs, template file, and temp upload dirs."""
+    root = WORKSPACE_DATA_DIR / user_id
+    return {
+        "root": root,
+        "mockups": root / "mockups",
+        "inputs": root / "input_images",
+        "outputs": root / "output",
+        "template_config": root / "template_config.json",
+        "temp_mockups": TEMP_ROOT_DIR / user_id / "mockups",
+        "temp_inputs": TEMP_ROOT_DIR / user_id / "input_images",
+    }
+
+
+def ensure_workspace_tree(paths: dict[str, Path]) -> None:
+    for key in ("mockups", "inputs", "outputs"):
+        paths[key].mkdir(parents=True, exist_ok=True)
+    paths["temp_mockups"].mkdir(parents=True, exist_ok=True)
+    paths["temp_inputs"].mkdir(parents=True, exist_ok=True)
+
+
 def ensure_dirs() -> None:
-    MOCKUPS_DIR.mkdir(parents=True, exist_ok=True)
-    INPUTS_DIR.mkdir(parents=True, exist_ok=True)
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    TEMP_MOCKUPS_DIR.mkdir(parents=True, exist_ok=True)
-    TEMP_INPUTS_DIR.mkdir(parents=True, exist_ok=True)
+    WORKSPACE_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    TEMP_ROOT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def safe_name(name: str) -> str:
@@ -67,11 +81,14 @@ def list_images(folder: Path, url_prefix: str):
     return files
 
 
-def list_outputs():
+def list_outputs(output_root: Path):
     files = []
-    for file in sorted(OUTPUT_DIR.rglob("*")):
+    output_root.mkdir(parents=True, exist_ok=True)
+    if not output_root.exists():
+        return files
+    for file in sorted(output_root.rglob("*")):
         if file.is_file() and file.suffix.lower() in IMAGE_SUFFIXES:
-            rel = file.relative_to(OUTPUT_DIR).as_posix()
+            rel = file.relative_to(output_root).as_posix()
             stat = file.stat()
             files.append(
                 {
@@ -100,14 +117,84 @@ def copy_images(src: Path, dst: Path):
             shutil.copy2(file, dst / file.name)
 
 
-def read_templates():
-    if TEMPLATE_CONFIG_PATH.exists():
-        return json.loads(TEMPLATE_CONFIG_PATH.read_text(encoding="utf-8"))
+def read_user_templates(user_id: str):
+    path = workspace_paths(user_id)["template_config"]
+    if path.exists():
+        return json.loads(path.read_text(encoding="utf-8"))
     return script.DEFAULT_TEMPLATES
 
 
-def write_templates(templates):
-    TEMPLATE_CONFIG_PATH.write_text(json.dumps(templates, indent=2), encoding="utf-8")
+def write_user_templates(user_id: str, templates) -> None:
+    paths = workspace_paths(user_id)
+    ensure_workspace_tree(paths)
+    paths["template_config"].write_text(json.dumps(templates, indent=2), encoding="utf-8")
+
+
+def validate_workspace_user_id(raw: str) -> str:
+    """Same rules as frontend: single path segment, safe for future namespaced dirs."""
+    trimmed = (raw or "").strip()
+    if not trimmed:
+        raise HTTPException(status_code=400, detail="User ID is required.")
+    if len(trimmed) > 128:
+        raise HTTPException(status_code=400, detail="User ID must be at most 128 characters.")
+    if "/" in trimmed or "\\" in trimmed or ".." in trimmed:
+        raise HTTPException(status_code=400, detail='User ID cannot contain "/", "\\", or "..".')
+    return trimmed
+
+
+def read_registered_workspace_users() -> list[dict]:
+    if not WORKSPACE_USERS_PATH.exists():
+        return []
+    try:
+        data = json.loads(WORKSPACE_USERS_PATH.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return []
+    if isinstance(data, dict) and isinstance(data.get("users"), list):
+        return [u for u in data["users"] if isinstance(u, dict) and u.get("user_id")]
+    return []
+
+
+def append_registered_workspace_user(user_id: str) -> None:
+    users = read_registered_workspace_users()
+    existing = {str(u.get("user_id", "")) for u in users}
+    if user_id in existing:
+        raise HTTPException(
+            status_code=409,
+            detail="This user ID is already taken. Choose a different one.",
+        )
+    users.append(
+        {
+            "user_id": user_id,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+    WORKSPACE_USERS_PATH.write_text(
+        json.dumps({"users": users}, indent=2),
+        encoding="utf-8",
+    )
+
+
+def registered_user_ids() -> set[str]:
+    return {str(u.get("user_id", "")) for u in read_registered_workspace_users()}
+
+
+def require_workspace_user(
+    x_workspace_user_id: str | None = Header(None, alias="X-Workspace-User-Id"),
+    workspace_user_id: str | None = Query(None),
+) -> str:
+    raw = (x_workspace_user_id or workspace_user_id or "").strip()
+    if not raw:
+        raise HTTPException(
+            status_code=401,
+            detail="Missing workspace user ID. Send header X-Workspace-User-Id.",
+        )
+    uid = validate_workspace_user_id(raw)
+    if uid not in registered_user_ids():
+        raise HTTPException(status_code=403, detail="Unknown workspace user ID.")
+    return uid
+
+
+WorkspaceUser = Annotated[str, Depends(require_workspace_user)]
 
 
 class RenamePayload(BaseModel):
@@ -120,6 +207,10 @@ class TemplatesPayload(BaseModel):
 
 class GeneratePayload(BaseModel):
     templates: list | None = None
+
+
+class WorkspaceRegisterPayload(BaseModel):
+    user_id: str
 
 
 app = FastAPI(title="Mock Generator API", version="1.0.0")
@@ -143,20 +234,45 @@ def health():
     return {"status": "ok"}
 
 
+@app.post("/api/workspace/register")
+def register_workspace_user(payload: WorkspaceRegisterPayload):
+    """Register a new workspace user ID. Rejects duplicates (409)."""
+    user_id = validate_workspace_user_id(payload.user_id)
+    append_registered_workspace_user(user_id)
+    return {"ok": True, "user_id": user_id}
+
+
+@app.post("/api/workspace/login")
+def login_workspace_user(payload: WorkspaceRegisterPayload):
+    """Confirm user ID exists (for returning users)."""
+    user_id = validate_workspace_user_id(payload.user_id)
+    existing = {str(u.get("user_id", "")) for u in read_registered_workspace_users()}
+    if user_id not in existing:
+        raise HTTPException(
+            status_code=404,
+            detail="No account found with this user ID. Create a new ID or check spelling.",
+        )
+    return {"ok": True, "user_id": user_id}
+
+
 @app.get("/api/assets")
-def get_assets():
+def get_assets(ws: WorkspaceUser):
     ensure_dirs()
+    paths = workspace_paths(ws)
+    ensure_workspace_tree(paths)
     return {
-        "mockups": list_images(MOCKUPS_DIR, "/api/files/mockups/"),
-        "inputs": list_images(INPUTS_DIR, "/api/files/inputs/"),
-        "outputs": list_outputs(),
+        "mockups": list_images(paths["mockups"], "/api/files/mockups/"),
+        "inputs": list_images(paths["inputs"], "/api/files/inputs/"),
+        "outputs": list_outputs(paths["outputs"]),
     }
 
 
 @app.post("/api/upload/{kind}")
-async def upload_files(kind: Literal["mockups", "inputs"], files: list[UploadFile] = File(...)):
+async def upload_files(ws: WorkspaceUser, kind: Literal["mockups", "inputs"], files: list[UploadFile] = File(...)):
     ensure_dirs()
-    target = MOCKUPS_DIR if kind == "mockups" else INPUTS_DIR
+    paths = workspace_paths(ws)
+    ensure_workspace_tree(paths)
+    target = paths["mockups"] if kind == "mockups" else paths["inputs"]
     for uploaded in files:
         name = safe_name(uploaded.filename or "file.png")
         path = safe_join(target, name)
@@ -166,76 +282,90 @@ async def upload_files(kind: Literal["mockups", "inputs"], files: list[UploadFil
 
 
 @app.post("/api/upload-temp/mockups")
-async def upload_mockups_temp(files: list[UploadFile] = File(...)):
+async def upload_mockups_temp(ws: WorkspaceUser, files: list[UploadFile] = File(...)):
     ensure_dirs()
-    clear_folder(TEMP_MOCKUPS_DIR)
+    paths = workspace_paths(ws)
+    ensure_workspace_tree(paths)
+    clear_folder(paths["temp_mockups"])
     for uploaded in files:
         name = safe_name(uploaded.filename or "mockup.png")
-        path = safe_join(TEMP_MOCKUPS_DIR, name)
+        path = safe_join(paths["temp_mockups"], name)
         content = await uploaded.read()
         path.write_bytes(content)
     return JSONResponse({"ok": True})
 
 
 @app.post("/api/upload-temp/inputs")
-async def upload_inputs_temp(files: list[UploadFile] = File(...)):
+async def upload_inputs_temp(ws: WorkspaceUser, files: list[UploadFile] = File(...)):
     ensure_dirs()
-    clear_folder(TEMP_INPUTS_DIR)
+    paths = workspace_paths(ws)
+    ensure_workspace_tree(paths)
+    clear_folder(paths["temp_inputs"])
     for uploaded in files:
         name = safe_name(uploaded.filename or "input.png")
-        path = safe_join(TEMP_INPUTS_DIR, name)
+        path = safe_join(paths["temp_inputs"], name)
         content = await uploaded.read()
         path.write_bytes(content)
     return JSONResponse({"ok": True})
 
 
 @app.delete("/api/assets/{kind}/{name}")
-def delete_asset(kind: Literal["mockups", "inputs", "outputs"], name: str):
+def delete_asset(ws: WorkspaceUser, kind: Literal["mockups", "inputs", "outputs"], name: str):
     ensure_dirs()
+    paths = workspace_paths(ws)
+    ensure_workspace_tree(paths)
     decoded = unquote(name)
     if kind == "mockups":
-        path = safe_join(MOCKUPS_DIR, decoded)
+        path = safe_join(paths["mockups"], decoded)
     elif kind == "inputs":
-        path = safe_join(INPUTS_DIR, decoded)
+        path = safe_join(paths["inputs"], decoded)
     else:
-        path = safe_join(OUTPUT_DIR, decoded)
+        path = safe_join(paths["outputs"], decoded)
     if path.exists():
         path.unlink()
     return {"ok": True}
 
 
 @app.delete("/api/assets/outputs-file/{file_path:path}")
-def delete_output_file(file_path: str):
+def delete_output_file(ws: WorkspaceUser, file_path: str):
     ensure_dirs()
-    path = safe_join(OUTPUT_DIR, unquote(file_path))
+    paths = workspace_paths(ws)
+    ensure_workspace_tree(paths)
+    path = safe_join(paths["outputs"], unquote(file_path))
     if path.exists() and path.is_file():
         path.unlink()
     return {"ok": True}
 
 
 @app.delete("/api/outputs/folder/{folder_name}")
-def delete_output_folder(folder_name: str):
+def delete_output_folder(ws: WorkspaceUser, folder_name: str):
     ensure_dirs()
+    paths = workspace_paths(ws)
+    ensure_workspace_tree(paths)
     safe_folder = safe_name(unquote(folder_name))
-    folder_path = safe_join(OUTPUT_DIR, safe_folder)
+    folder_path = safe_join(paths["outputs"], safe_folder)
     if folder_path.exists() and folder_path.is_dir():
         shutil.rmtree(folder_path)
     return {"ok": True}
 
 
 @app.delete("/api/assets/{kind}")
-def clear_assets(kind: Literal["mockups", "inputs", "outputs"]):
+def clear_assets(ws: WorkspaceUser, kind: Literal["mockups", "inputs", "outputs"]):
     ensure_dirs()
-    target = {"mockups": MOCKUPS_DIR, "inputs": INPUTS_DIR, "outputs": OUTPUT_DIR}[kind]
+    paths = workspace_paths(ws)
+    ensure_workspace_tree(paths)
+    target = {"mockups": paths["mockups"], "inputs": paths["inputs"], "outputs": paths["outputs"]}[kind]
     clear_folder(target)
     return {"ok": True}
 
 
 @app.post("/api/assets/{kind}/{name}/rename")
-def rename_asset(kind: Literal["mockups", "inputs"], name: str, payload: RenamePayload):
+def rename_asset(ws: WorkspaceUser, kind: Literal["mockups", "inputs"], name: str, payload: RenamePayload):
     ensure_dirs()
+    paths = workspace_paths(ws)
+    ensure_workspace_tree(paths)
     decoded = unquote(name)
-    src_base = MOCKUPS_DIR if kind == "mockups" else INPUTS_DIR
+    src_base = paths["mockups"] if kind == "mockups" else paths["inputs"]
     src = safe_join(src_base, decoded)
     if not src.exists():
         raise HTTPException(status_code=404, detail="File not found.")
@@ -248,45 +378,59 @@ def rename_asset(kind: Literal["mockups", "inputs"], name: str, payload: RenameP
 
 
 @app.get("/api/templates")
-def get_templates():
-    return {"templates": read_templates()}
+def get_templates(ws: WorkspaceUser):
+    return {"templates": read_user_templates(ws)}
 
 
 @app.post("/api/templates")
-def save_templates(payload: TemplatesPayload):
-    write_templates(payload.templates)
+def save_templates(ws: WorkspaceUser, payload: TemplatesPayload):
+    write_user_templates(ws, payload.templates)
     return {"ok": True}
 
 
+def _rel_env_path(p: Path) -> str:
+    return p.relative_to(BASE_DIR).as_posix()
+
+
 @app.post("/api/generate")
-def generate(payload: GeneratePayload | None = None):
+def generate(ws: WorkspaceUser, payload: GeneratePayload | None = None):
     ensure_dirs()
     if payload is None or payload.templates is None:
         raise HTTPException(status_code=400, detail="Templates are required in generate payload.")
     if not isinstance(payload.templates, list) or len(payload.templates) == 0:
         raise HTTPException(status_code=400, detail="Templates payload must be a non-empty array.")
 
+    paths = workspace_paths(ws)
+    ensure_workspace_tree(paths)
+
     # Always use templates provided by frontend for this run.
-    write_templates(payload.templates)
+    write_user_templates(ws, payload.templates)
     # If frontend uploaded mockups to temp area, use those for this run.
     temp_has_mockups = any(
         file.is_file() and file.suffix.lower() in IMAGE_SUFFIXES
-        for file in TEMP_MOCKUPS_DIR.iterdir()
+        for file in paths["temp_mockups"].iterdir()
     )
     if temp_has_mockups:
-        copy_images(TEMP_MOCKUPS_DIR, MOCKUPS_DIR)
+        copy_images(paths["temp_mockups"], paths["mockups"])
     temp_has_inputs = any(
         file.is_file() and file.suffix.lower() in IMAGE_SUFFIXES
-        for file in TEMP_INPUTS_DIR.iterdir()
+        for file in paths["temp_inputs"].iterdir()
     )
     if temp_has_inputs:
-        copy_images(TEMP_INPUTS_DIR, INPUTS_DIR)
+        copy_images(paths["temp_inputs"], paths["inputs"])
+
+    gen_env = os.environ.copy()
+    gen_env["MOCKGENERATOR_INPUT_FOLDER"] = _rel_env_path(paths["inputs"])
+    gen_env["MOCKGENERATOR_OUTPUT_FOLDER"] = _rel_env_path(paths["outputs"])
+    gen_env["MOCKGENERATOR_MOCKUPS_FOLDER"] = _rel_env_path(paths["mockups"])
+    gen_env["MOCKGENERATOR_TEMPLATE_CONFIG"] = _rel_env_path(paths["template_config"])
 
     process = subprocess.run(
         [sys.executable, "script.py"],
         cwd=str(BASE_DIR),
         capture_output=True,
         text=True,
+        env=gen_env,
     )
     if process.returncode != 0:
         raise HTTPException(
@@ -301,35 +445,43 @@ def generate(payload: GeneratePayload | None = None):
 
 
 @app.get("/api/files/mockups/{name}")
-def file_mockup(name: str):
-    path = safe_join(MOCKUPS_DIR, unquote(name))
+def file_mockup(ws: WorkspaceUser, name: str):
+    paths = workspace_paths(ws)
+    ensure_workspace_tree(paths)
+    path = safe_join(paths["mockups"], unquote(name))
     if not path.exists():
         raise HTTPException(status_code=404, detail="File not found.")
     return FileResponse(path)
 
 
 @app.get("/api/files/inputs/{name}")
-def file_input(name: str):
-    path = safe_join(INPUTS_DIR, unquote(name))
+def file_input(ws: WorkspaceUser, name: str):
+    paths = workspace_paths(ws)
+    ensure_workspace_tree(paths)
+    path = safe_join(paths["inputs"], unquote(name))
     if not path.exists():
         raise HTTPException(status_code=404, detail="File not found.")
     return FileResponse(path)
 
 
 @app.get("/api/files/output/{file_path:path}")
-def file_output(file_path: str):
-    path = safe_join(OUTPUT_DIR, unquote(file_path))
+def file_output(ws: WorkspaceUser, file_path: str):
+    paths = workspace_paths(ws)
+    ensure_workspace_tree(paths)
+    path = safe_join(paths["outputs"], unquote(file_path))
     if not path.exists():
         raise HTTPException(status_code=404, detail="File not found.")
     return FileResponse(path)
 
 
 @app.get("/api/download/outputs")
-def download_outputs():
+def download_outputs(ws: WorkspaceUser):
     ensure_dirs()
+    paths = workspace_paths(ws)
+    ensure_workspace_tree(paths)
     tmp_dir = Path(tempfile.mkdtemp(prefix="mockgen-"))
     archive_base = tmp_dir / "outputs"
-    archive_path = shutil.make_archive(str(archive_base), "zip", root_dir=str(OUTPUT_DIR))
+    archive_path = shutil.make_archive(str(archive_base), "zip", root_dir=str(paths["outputs"]))
     return FileResponse(
         archive_path,
         media_type="application/zip",
@@ -338,9 +490,11 @@ def download_outputs():
 
 
 @app.get("/api/download/output-file/{file_path:path}")
-def download_output_file(file_path: str):
+def download_output_file(ws: WorkspaceUser, file_path: str):
     ensure_dirs()
-    path = safe_join(OUTPUT_DIR, unquote(file_path))
+    paths = workspace_paths(ws)
+    ensure_workspace_tree(paths)
+    path = safe_join(paths["outputs"], unquote(file_path))
     if not path.exists() or not path.is_file():
         raise HTTPException(status_code=404, detail="File not found.")
     return FileResponse(
@@ -351,10 +505,12 @@ def download_output_file(file_path: str):
 
 
 @app.get("/api/download/output-folder/{folder_name}")
-def download_output_folder(folder_name: str):
+def download_output_folder(ws: WorkspaceUser, folder_name: str):
     ensure_dirs()
+    paths = workspace_paths(ws)
+    ensure_workspace_tree(paths)
     safe_folder = safe_name(unquote(folder_name))
-    folder_path = safe_join(OUTPUT_DIR, safe_folder)
+    folder_path = safe_join(paths["outputs"], safe_folder)
     if not folder_path.exists() or not folder_path.is_dir():
         raise HTTPException(status_code=404, detail="Output folder not found.")
 

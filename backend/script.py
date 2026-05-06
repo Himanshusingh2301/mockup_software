@@ -8,8 +8,11 @@ from PIL import Image
 from scipy.ndimage import label
 
 # ===== CONFIG =====
-INPUT_FOLDER = "input_images"
-OUTPUT_FOLDER = "output"
+# api.py sets these via env when running per-workspace users; defaults keep CLI/local runs working.
+INPUT_FOLDER = os.environ.get("MOCKGENERATOR_INPUT_FOLDER") or "input_images"
+OUTPUT_FOLDER = os.environ.get("MOCKGENERATOR_OUTPUT_FOLDER") or "output"
+MOCKUPS_FOLDER = os.environ.get("MOCKGENERATOR_MOCKUPS_FOLDER") or "mockups"
+TEMPLATE_CONFIG_PATH = os.environ.get("MOCKGENERATOR_TEMPLATE_CONFIG") or "template_config.json"
 INTERNAL_RENDER_SCALE = 2
 
 # --- Template model (preferred) ---
@@ -116,13 +119,13 @@ def is_image_file(name):
 
 
 def resolve_template_path(template_path):
-    """Resolve template file: exact path, then basename in cwd, then mockups/basename."""
+    """Resolve template file: exact path, then basename in cwd, then mockups-dir/basename."""
     if os.path.isfile(template_path):
         return template_path
     base = os.path.basename(template_path)
     if os.path.isfile(base):
         return base
-    alt = os.path.join("mockups", base)
+    alt = os.path.join(MOCKUPS_FOLDER, base)
     if os.path.isfile(alt):
         return alt
     raise FileNotFoundError(
@@ -137,7 +140,7 @@ def mockup_file_key(template_path_resolved):
 
 
 def load_templates():
-    config_path = "template_config.json"
+    config_path = TEMPLATE_CONFIG_PATH
     if os.path.exists(config_path):
         with open(config_path, "r", encoding="utf-8") as f:
             loaded = json.load(f)

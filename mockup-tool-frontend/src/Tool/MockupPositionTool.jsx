@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
-import { FiTrash2 } from "react-icons/fi";
-import { api, apiBase } from "../api";
+import { FiDownload, FiTrash2, FiZap } from "react-icons/fi";
+import UserAvatarMenu from "../components/UserAvatarMenu";
+import { api, apiBase, appendWorkspaceAuth } from "../api";
 
 const USE_CASES = [
   {
@@ -93,13 +94,16 @@ const DEFAULT_TEMPLATES = [
 ];
 
 function normalizeAssetUrls(items) {
-  return (items || []).map((item) => ({
-    ...item,
-    id: item.id || item.name,
-    displayName: item.displayName || item.name,
-    originalName: item.name,
-    url: item.url?.startsWith("http") ? item.url : `${apiBase}${item.url}`,
-  }));
+  return (items || []).map((item) => {
+    const raw = item.url?.startsWith("http") ? item.url : `${apiBase}${item.url}`;
+    return {
+      ...item,
+      id: item.id || item.name,
+      displayName: item.displayName || item.name,
+      originalName: item.name,
+      url: appendWorkspaceAuth(raw),
+    };
+  });
 }
 
 function fileItemsFromList(fileList) {
@@ -127,7 +131,7 @@ function mergeFileItems(existingItems, incomingItems) {
   return [...existingItems, ...appended];
 }
 
-export default function MockupPositionTool() {
+export default function MockupPositionTool({ workspaceUserId, onLogout }) {
   const [mockups, setMockups] = useState([]);
   const [inputs, setInputs] = useState([]);
   const [outputs, setOutputs] = useState([]);
@@ -558,7 +562,7 @@ export default function MockupPositionTool() {
             </button>
           )}
         </div>
-      </div>
+        </div>
 
       {!hideUpload && (
         <label className="block">
@@ -610,7 +614,7 @@ export default function MockupPositionTool() {
                   <FiTrash2 size={12} />
                   Delete
                 </button>
-              </div>
+        </div>
               <input
                 value={item.displayName}
                 onClick={(event) => event.stopPropagation()}
@@ -644,7 +648,7 @@ export default function MockupPositionTool() {
             </button>
           )}
         </div>
-      </div>
+        </div>
 
       <div className="grid gap-2 rounded-xl border border-[#a594d2] bg-white/90 p-2">
         {outputFolders.length === 0 && (
@@ -686,7 +690,7 @@ export default function MockupPositionTool() {
                 title="Delete folder"
               >
                 <FiTrash2 size={13} />
-              </button>
+          </button>
             </div>
           </div>
         ))}
@@ -728,7 +732,7 @@ export default function MockupPositionTool() {
                     >
                       Download
                     </a>
-                    <button
+          <button
                       type="button"
                       onClick={(event) => {
                         event.stopPropagation();
@@ -738,7 +742,7 @@ export default function MockupPositionTool() {
                       title="Delete file"
                     >
                       <FiTrash2 size={13} />
-                    </button>
+          </button>
                   </div>
                 </div>
               );
@@ -751,34 +755,56 @@ export default function MockupPositionTool() {
 
   return (
     <div className="min-h-screen bg-slate-100 text-slate-900">
-      <header className="border-b border-slate-200 bg-white">
-        <div className="mx-auto flex max-w-[1600px] items-center justify-between px-6 py-4">
-          <div>
-            <h1 className="text-xl font-bold tracking-tight">Mock Generator Studio</h1>
-            <p className="text-sm text-slate-500">
-              Backend-driven workflow: manage files, templates, and config for script-based generation.
-            </p>
+      <header className="sticky top-0 z-[100] border-b border-slate-200/80 bg-gradient-to-b from-white via-white to-slate-50/90 shadow-[0_6px_24px_-10px_rgba(15,23,42,0.14)] backdrop-blur-md backdrop-saturate-150">
+        <div className="mx-auto flex max-w-[1600px] flex-wrap items-center justify-between gap-3 px-4 py-3 sm:gap-4 sm:px-6 sm:py-3.5">
+          <div className="flex min-w-0 flex-1 items-center gap-3 sm:gap-3.5">
+            <div
+              className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-slate-700 via-[#2f6163] to-[#3d7375] text-base font-black text-white shadow-[0_6px_16px_-4px_rgba(30,41,59,0.45)] ring-2 ring-white ring-offset-2 ring-offset-white"
+              aria-hidden
+            >
+              M
+            </div>
+            <div className="flex min-w-0 flex-wrap items-center gap-2 sm:gap-2.5">
+              <h1 className="text-lg font-extrabold leading-none tracking-tight text-slate-900 sm:text-xl">
+                Mock Generator Studio
+              </h1>
+              <span className="rounded-md bg-gradient-to-r from-[#e0f0f0] to-[#cfe4e4] px-2 py-0.5 text-[9px] font-bold uppercase leading-none tracking-[0.14em] text-[#1a4a4c] ring-1 ring-[#8db6b8]/50 sm:text-[10px]">
+                Canvas
+              </span>
+            </div>
           </div>
-          <div className="flex items-center gap-3">
+          <div className="flex w-full shrink-0 items-center justify-end gap-2 sm:w-auto sm:gap-3">
             {isLoading && (
-              <span className="rounded-full bg-amber-100 px-3 py-1 text-xs font-semibold text-amber-700">
-                Syncing...
+              <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-200/80 bg-gradient-to-b from-amber-50 to-amber-100/90 px-3 py-1.5 text-xs font-semibold text-amber-800 shadow-sm">
+                <span className="relative flex h-2 w-2">
+                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-amber-400 opacity-75" />
+                  <span className="relative inline-flex h-2 w-2 rounded-full bg-amber-500" />
+                </span>
+                Syncing…
               </span>
             )}
             <a
               href={api.downloadOutputs()}
-              className="rounded-lg bg-slate-700 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-slate-800"
+              className="group inline-flex items-center gap-2 rounded-xl border border-slate-600/90 bg-gradient-to-b from-slate-700 to-slate-800 px-4 py-2.5 text-sm font-semibold text-white shadow-[0_4px_0_0_#1e293b] transition hover:-translate-y-px hover:from-slate-600 hover:to-slate-700 hover:shadow-[0_3px_0_0_#1e293b] active:translate-y-[3px] active:shadow-none"
             >
-              Download Outputs
+              <FiDownload className="h-4 w-4 opacity-90 transition group-hover:translate-y-px" aria-hidden />
+              Download all
             </a>
             <button
               type="button"
               onClick={handleGenerateMockups}
-              className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-emerald-700"
+              disabled={isGenerating}
+              className="inline-flex items-center gap-2 rounded-xl border border-emerald-700/90 bg-gradient-to-b from-emerald-500 to-emerald-600 px-4 py-2.5 text-sm font-semibold text-white shadow-[0_4px_0_0_#047857] transition enabled:hover:-translate-y-px enabled:hover:from-emerald-400 enabled:hover:to-emerald-500 enabled:hover:shadow-[0_3px_0_0_#047857] enabled:active:translate-y-[3px] enabled:active:shadow-none disabled:cursor-wait disabled:opacity-90"
             >
-              {isGenerating ? "Preparing..." : "Generate Mockups"}
+              <FiZap className={`h-4 w-4 ${isGenerating ? "animate-pulse" : ""}`} aria-hidden />
+              {isGenerating ? "Working…" : "Generate mockups"}
             </button>
-            <span className="rounded-full bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-700">Backend Aligned UI</span>
+            {workspaceUserId ? (
+              <>
+                <span className="hidden h-9 w-px bg-slate-200 md:block" aria-hidden />
+                <UserAvatarMenu workspaceUserId={workspaceUserId} onLogout={onLogout} />
+              </>
+            ) : null}
           </div>
         </div>
       </header>
@@ -795,7 +821,7 @@ export default function MockupPositionTool() {
             <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-600">
               {mockups.length + inputs.length + outputs.length} files
             </span>
-          </div>
+      </div>
 
           {renderFileGroup({
             title: "Mockups Folder",
