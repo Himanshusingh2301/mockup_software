@@ -38,6 +38,9 @@ backend/output/
 # Local runtime data (per machine / per deploy — not source)
 backend/input_images/
 backend/mockups/
+backend/template_config.json
+backend/workspace_users.json
+backend/workspace_data/
 
 backend/temp/
 
@@ -51,6 +54,12 @@ node_modules/
 # Vercel — CLI project link & local build cache (commit vercel.json if you add it)
 .vercel/
 **/.vercel/
+
+# Desktop packaging build artifacts
+backend/build/
+backend/dist/
+backend/*.spec
+packaging/windows/Output/
 
 # Logs & debug
 *.log

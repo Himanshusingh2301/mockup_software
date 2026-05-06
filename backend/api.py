@@ -4,7 +4,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from contextlib import redirect_stdout
 from datetime import datetime, timezone
+from io import StringIO
 from pathlib import Path
 from typing import Annotated, Literal
 from urllib.parse import quote, unquote
@@ -17,9 +19,14 @@ from pydantic import BaseModel
 import script
 
 BASE_DIR = Path(__file__).resolve().parent
-WORKSPACE_DATA_DIR = BASE_DIR / "workspace_data"
-WORKSPACE_USERS_PATH = BASE_DIR / "workspace_users.json"
+# Packaged desktop exe: persist workspaces outside the PyInstaller bundle via MOCKGENERATOR_DATA_ROOT.
+DATA_ROOT = Path(os.getenv("MOCKGENERATOR_DATA_ROOT", str(BASE_DIR))).resolve()
+WORKSPACE_DATA_DIR = DATA_ROOT / "workspace_data"
+WORKSPACE_USERS_PATH = DATA_ROOT / "workspace_users.json"
 TEMP_ROOT_DIR = Path(tempfile.gettempdir()) / "mockgenerator"
+FRONTEND_DIST_DIR = Path(
+    os.getenv("MOCKGENERATOR_FRONTEND_DIST", str(BASE_DIR.parent / "mockup-tool-frontend" / "dist"))
+).resolve()
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
 
 
@@ -47,6 +54,31 @@ def ensure_workspace_tree(paths: dict[str, Path]) -> None:
 def ensure_dirs() -> None:
     WORKSPACE_DATA_DIR.mkdir(parents=True, exist_ok=True)
     TEMP_ROOT_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _frontend_index_path() -> Path:
+    return FRONTEND_DIST_DIR / "index.html"
+
+
+def _frontend_is_available() -> bool:
+    return _frontend_index_path().exists()
+
+
+def _frontend_file_or_index(full_path: str) -> FileResponse:
+    """
+    Serve built frontend assets for local desktop mode.
+    Unknown paths fall back to index.html for SPA routing.
+    """
+    if not _frontend_is_available():
+        raise HTTPException(status_code=404, detail="Frontend build not found.")
+
+    rel = full_path.lstrip("/")
+    if rel:
+        candidate = (FRONTEND_DIST_DIR / rel).resolve()
+        if FRONTEND_DIST_DIR in candidate.parents and candidate.exists() and candidate.is_file():
+            return FileResponse(candidate)
+
+    return FileResponse(_frontend_index_path())
 
 
 def safe_name(name: str) -> str:
@@ -260,6 +292,8 @@ def health():
 
 @app.get("/")
 def root_health():
+    if _frontend_is_available():
+        return FileResponse(_frontend_index_path())
     return {"status": "ok", "service": "mockgenerator-api"}
 
 
@@ -423,7 +457,38 @@ def save_templates(ws: WorkspaceUser, payload: TemplatesPayload):
 
 
 def _rel_env_path(p: Path) -> str:
-    return p.relative_to(BASE_DIR).as_posix()
+    """Paths for script.py / subprocess cwd; use absolute if outside BASE_DIR (e.g. Local AppData)."""
+    resolved = p.resolve()
+    base = BASE_DIR.resolve()
+    try:
+        return resolved.relative_to(base).as_posix()
+    except ValueError:
+        return str(resolved)
+
+
+def _run_script_inprocess(paths: dict[str, Path]) -> str:
+    """
+    Desktop/package mode: run generation in-process (no subprocess/script.py path issues).
+    """
+    old_input = script.INPUT_FOLDER
+    old_output = script.OUTPUT_FOLDER
+    old_mockups = script.MOCKUPS_FOLDER
+    old_template = script.TEMPLATE_CONFIG_PATH
+    try:
+        script.INPUT_FOLDER = _rel_env_path(paths["inputs"])
+        script.OUTPUT_FOLDER = _rel_env_path(paths["outputs"])
+        script.MOCKUPS_FOLDER = _rel_env_path(paths["mockups"])
+        script.TEMPLATE_CONFIG_PATH = _rel_env_path(paths["template_config"])
+
+        buf = StringIO()
+        with redirect_stdout(buf):
+            script.main()
+        return buf.getvalue()
+    finally:
+        script.INPUT_FOLDER = old_input
+        script.OUTPUT_FOLDER = old_output
+        script.MOCKUPS_FOLDER = old_mockups
+        script.TEMPLATE_CONFIG_PATH = old_template
 
 
 @app.post("/api/generate")
@@ -456,37 +521,54 @@ def generate(ws: WorkspaceUser, payload: GeneratePayload | None = None):
     if temp_has_inputs:
         copy_images(paths["temp_inputs"], paths["inputs"])
 
-    gen_env = os.environ.copy()
-    gen_env["MOCKGENERATOR_INPUT_FOLDER"] = _rel_env_path(paths["inputs"])
-    gen_env["MOCKGENERATOR_OUTPUT_FOLDER"] = _rel_env_path(paths["outputs"])
-    gen_env["MOCKGENERATOR_MOCKUPS_FOLDER"] = _rel_env_path(paths["mockups"])
-    gen_env["MOCKGENERATOR_TEMPLATE_CONFIG"] = _rel_env_path(paths["template_config"])
+    # Use in-process mode for packaged desktop binary, optional opt-in via env for constrained hosts.
+    run_inprocess = getattr(sys, "frozen", False) or os.getenv("MOCKGENERATOR_RUN_INPROCESS") == "1"
+    if run_inprocess:
+        try:
+            print("[generate] running script.py in-process ...", flush=True)
+            out = _run_script_inprocess(paths)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "message": "Generation failed.",
+                    "stdout": "",
+                    "stderr": str(exc),
+                },
+            ) from exc
+    else:
+        gen_env = os.environ.copy()
+        gen_env["MOCKGENERATOR_INPUT_FOLDER"] = _rel_env_path(paths["inputs"])
+        gen_env["MOCKGENERATOR_OUTPUT_FOLDER"] = _rel_env_path(paths["outputs"])
+        gen_env["MOCKGENERATOR_MOCKUPS_FOLDER"] = _rel_env_path(paths["mockups"])
+        gen_env["MOCKGENERATOR_TEMPLATE_CONFIG"] = _rel_env_path(paths["template_config"])
 
-    print("[generate] running script.py ...", flush=True)
-    process = subprocess.run(
-        [sys.executable, "script.py"],
-        cwd=str(BASE_DIR),
-        capture_output=True,
-        text=True,
-        env=gen_env,
-    )
-    print(f"[generate] script returncode={process.returncode}", flush=True)
-    if process.returncode != 0:
-        print(
-            "[generate] script stderr snippet:\n"
-            + "\n".join(process.stderr.splitlines()[:40]),
-            flush=True,
+        print("[generate] running script.py ...", flush=True)
+        process = subprocess.run(
+            [sys.executable, "script.py"],
+            cwd=str(BASE_DIR),
+            capture_output=True,
+            text=True,
+            env=gen_env,
         )
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "message": "Generation failed.",
-                "stdout": process.stdout,
-                "stderr": process.stderr,
-            },
-        )
+        print(f"[generate] script returncode={process.returncode}", flush=True)
+        if process.returncode != 0:
+            print(
+                "[generate] script stderr snippet:\n"
+                + "\n".join(process.stderr.splitlines()[:40]),
+                flush=True,
+            )
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "message": "Generation failed.",
+                    "stdout": process.stdout,
+                    "stderr": process.stderr,
+                },
+            )
+        out = process.stdout
     print("[generate] success", flush=True)
-    return {"ok": True, "stdout": process.stdout}
+    return {"ok": True, "stdout": out}
 
 
 @app.get("/api/files/mockups/{name}")
@@ -567,4 +649,11 @@ def download_output_folder(ws: WorkspaceUser, folder_name: str):
         media_type="application/zip",
         filename=f"{safe_folder}.zip",
     )
+
+
+@app.get("/{full_path:path}")
+def frontend_spa_fallback(full_path: str):
+    if full_path.startswith("api/") or full_path in {"docs", "redoc", "openapi.json"}:
+        raise HTTPException(status_code=404, detail="Not found.")
+    return _frontend_file_or_index(full_path)
 
