@@ -258,6 +258,16 @@ def health():
     return {"status": "ok"}
 
 
+@app.get("/")
+def root_health():
+    return {"status": "ok", "service": "mockgenerator-api"}
+
+
+@app.head("/")
+def root_health_head():
+    return JSONResponse(status_code=200, content=None)
+
+
 @app.post("/api/workspace/register")
 def register_workspace_user(payload: WorkspaceRegisterPayload):
     """Register a new workspace user ID. Rejects duplicates (409)."""
